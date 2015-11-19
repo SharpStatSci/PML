@@ -1,3 +1,4 @@
 # PML
 Practical Machine Learning Course Project
-Attempting to create gh-pages for rendering HTML output of our project.
+
+Link to HTML report: [http://sharpstatsci.github.io/PML/]
