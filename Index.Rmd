@@ -1,0 +1,259 @@
+---
+title: "Practical Machine Learning Project"
+author: "Jesse Sharp"
+date: '2015-11-19'
+output: html_document
+subtitle: Predict Correct or Incorrect Exercise Performance from Movement Data
+---
+
+### Summary
+Using a fairly simple Random Forest model we were able to predict exercise category
+("Classe") correctly 99% of the time. Our approach involved data cleaning, a
+simple classification tree (not shown) and finally a random forest model. 
+
+
+### Pre Processing
+####Key Points about the data:  
+Exercise is one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl  
+"Classe" is the outcome and represents:      
+    A: Correct  
+    B: Throwing elbows  
+    C: Half-lifting  
+    D: Half-lowering  
+    E: Throwing hips
+    
+Sensors on the body: forearm, (upper) arm, belt (lower back)    
+Sensor on the 1.25kg dumbbell   
+  Measurements: 
+    Pitch: up/down around horizontal  
+    Roll: rotation on horizontal   
+    Yaw: rotation around vertical   
+    Gyros: gyroscopic sensor readings (x,y,z)  
+    Accel: accelerometer readings (x,y,z)  
+    Magnet: magnemoter readings (x,y,z)  
+  
+More Information: [http://groupware.les.inf.puc-rio.br/har] .
+Some output generates below from setting the libraries we are going to use.  
+
+```{r readit, echo=FALSE}
+# Set the working directory, get and load data file, initialize libraries
+#getwd()
+setwd("C:/StatWare/Rprog/PML")
+library(data.table)
+library(caret)
+library(ggplot2)
+library(rattle)
+library(randomForest)
+
+# Read and initial variable selection
+droplist <- c("V1","user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window")
+
+patrain0 <- fread("C:/StatWare/Rprog/PML/data/pml-training.csv", drop=droplist, data.table=FALSE, na.strings=c("#DIV/0!","NA",""))
+
+patest0 <- fread("C:/StatWare/Rprog/PML/data/pml-testing.csv", drop=droplist, data.table=FALSE, na.strings=c("#DIV/0!","NA",""))
+
+# drop variables with no valid values
+patrain <- patrain0[,colSums(is.na(patrain0)) == 0]
+patest <- patest0[,colSums(is.na(patest0)) == 0]
+```
+
+One thought would be forearm measurements are important, especially for detecting conditions 
+C and D. Also, it might be correlated with measurements from the dumbell itself. For detecting conditions B and E we might expect pitch and yaw measures from the arm and belt to be of 
+interest.
+  
+Since there are too many columns for a simple predictive model we apply some pre-processing 
+in a global fashion. We might not use such a "black box" process if we were subject matter experts.  
+
+
+### Cleaning and Feature Selection
+
+The raw training file has 19,622 rows and 160 columns. We removed 7 columns based on
+inspection and another 100 by removing columns with no valid values. Testing for near zero
+variance was done and no further columns were removed by that process. At this stage
+we create the validation data set, doing a 60/40 split because we don't want to train on
+more data than needed.
+
+```{r preproc,  cache=TRUE}
+# Physical Activity data after loading and removing NA columns
+dim(patrain) # rows and columns
+print(table(patrain$classe)/19622,dig=3) # classe prevalence
+# create a validation data set, enough obs to do 60/40
+set.seed(34567) # reproducability
+inTrain <- createDataPartition(y=patrain$classe, p=0.6, list=FALSE)
+patrain1 <- patrain[inTrain,]
+pavalidate <- patrain[-inTrain,]
+# Obs by Classe in Train set
+table(patrain1$classe)
+table(patrain1$classe)[[2]]/table(patrain$classe)[[2]] # 60/40 split
+```
+
+Above we see the data split, below further examination to find highly correlated fields and remove them. Note that in developing our process we also centered and scaled the measures but we found no improvement to the model and when possible it is preferrable to use features in their original scales for interpretability. A sample correlation plot is in the appendix.
+
+```{r docorr}
+# Eliminate highly correlated fields
+patrainCor <- cor(patrain1[,1:52])
+highlyCor <- findCorrelation(patrainCor, cutoff = .75)
+patrain2 <- patrain1[,-highlyCor]
+
+# Apply to validate and test data
+pavalidate2 <- pavalidate[,-highlyCor]
+patest2 <- patest[,-highlyCor]
+
+dim(patrain2) # Training Data Set
+dim(pavalidate2) # Validation Data Set
+```
+
+Look at a couple of the measures by exercise to get some visual sense of our data. These are samples. Conditions A and E show the most distinction in these two plots.
+
+```{r multiplots, echo=FALSE}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+```{r simplot, echo=FALSE}
+# Simple Plots with Outcome
+plot1 <- qplot(total_accel_forearm,colour=classe,data=patrain2,geom="density")
+plot2 <- qplot(y=gyros_belt_x,x=classe,colour=classe,data=patrain2,geom="violin",fill=classe)
+multiplot(plot1,plot2,cols=1)
+```
+
+### Build a Model
+
+As noted we did a simple classification tree but that model yielded poor results. Due to space constraints we don't include it but the tree plot is a useful way to get a better feel for the relationships between the features and the outcome.
+  
+Below we show the simple proccess we followed to create a random forest model.
+
+```{r modfits}
+# Fit the model to the feature set and print a few rows of feature importance
+modFit2 <- randomForest(as.factor(classe) ~ ., data=patrain2, importance=TRUE,prox=TRUE)
+modFit2$importance[6:10,1:6]
+```
+
+```{r modplot, echo=FALSE}
+# Plot the Out of Bag error (OOB), overall and by Classe
+plot(modFit2, main="RF OOB Error Rate by Classe and Trees")
+mylegend <- colnames(modFit2$err.rate)
+legend("top", cex =0.8, legend=mylegend, lty=c(1,2,3,4,5,6), col=c(1,2,3,4,5,6), horiz=T)
+
+# Look at our in sample error
+confusionMatrix(patrain2$classe,predict(modFit2,patrain2))
+```
+  
+The plot above shows that the models do best for classe A. The good performance on E was somewhat unexpected. Notice that it appears we could have reduced the number of trees from the default 500 and still achieved the same accuracy.   
+
+The confusion matrix tells us that we have acheived an excellent fit--on our training data at least. See the appendix for a note on the out of bag error.
+  
+ 
+### Cross Validation and Conclusion
+We don't really believe we have acheived a perfect model. Indeed, we ran the process with default settings. We know out of sample error > in sample error and so expect about 1% or so error on our validation data.
+
+```{r predictit, echo=FALSE}
+# Confusion Matrix for Validation Data 
+confusionMatrix(pavalidate2$classe,predict(modFit2,pavalidate2))
+```
+
+From the confusion matrix generated by comparing the predicted classe to the actual classe we can estimate the out of sample error rate (OOS) to be approximately less than 1 - accuracy, using the 95% CI we get between 0.82% and 1.28%. We can also see we perform differently depending on the category. 
+
+For this project we are satisified with our model, having explored many of the methods we learned in lecture. Certainly in general we would want to do a more in depth process. 
+
+
+## Prediction on a Small Test Set
+We were given a small test set and process for submitting 20 individual predictions as a second part of the project. The table shows that the predictions do not have the same distibution as the original and validation data.
+
+```{r submitcode, echo=FALSE}
+predsubmit <- predict(modFit2, patest2, type = "class")
+
+#Function to generate files with predictions to submit for assignment
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+#pml_write_files(predsubmit)
+table(predsubmit)
+```
+
+## Appendix
+
+#### Correlation Matrix for Feature Labels Containing _z   
+
+Example Relationships after removing fields with abs(Corr) > 0.75. Upper panel are the correlation values. Notice that we still see relationship between forearm and dumbbell that we thought we might see. Additionally, the plots show some interesting non-linear relationships.
+
+```{r corrplot,echo=FALSE}
+## put (absolute) correlations on the upper panels,
+## with size proportional to the correlations. upper.panel=panel.cor
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+
+## put histograms on the diagonal diag.panel=panel.hist
+panel.hist <- function(x, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(usr[1:2], 0, 1.5) )
+    h <- hist(x, plot = FALSE)
+    breaks <- h$breaks; nB <- length(breaks)
+    y <- h$counts; y <- y/max(y)
+    rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+
+pairs(patrain2[,grep("_z",colnames(patrain2))],upper.panel=panel.cor,lower.panel=panel.smooth,diag.panel=panel.hist)
+```
+
+####Out of Bag Error      
+Here is the OOB for the RF model we used above.
+```{r modoob}
+# Print modFit2 summary
+modFit2
+```
+
+The definition below is copied verbatim from the linked source.  
+[https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr]  
+Each tree is constructed using a different bootstrap sample from the original data. About one-third of the cases are left out of the bootstrap sample and not used in the construction of the kth tree.
+
+Put each case left out in the construction of the kth tree down the kth tree to get a classification. In this way, a test set classification is obtained for each case in about one-third of the trees. At the end of the run, take j to be the class that got most of the votes every time case n was oob. The proportion of times that j is not equal to the true class of n averaged over all cases is the oob error estimate. This has proven to be unbiased in many tests. 
+
+
+
+
+
